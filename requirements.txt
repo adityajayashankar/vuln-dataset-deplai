@@ -1,7 +1,13 @@
+# ── Core HTTP + parsing ───────────────────────────────────────────────────
 requests
 tqdm
+beautifulsoup4
+
+# ── Web crawling ──────────────────────────────────────────────────────────
 crawl4ai
 playwright
+
+# ── Model training ────────────────────────────────────────────────────────
 datasets
 transformers>=4.38.0
 peft>=0.10.0
@@ -11,10 +17,27 @@ bitsandbytes
 torch
 huggingface_hub
 
-#Research paper crawling
-beautifulsoup4
-PyPDF2
-scholarly
+# ── Research paper crawling ───────────────────────────────────────────────
+pypdf                    # maintained fork of PyPDF2 — use this
+PyPDF2                   # fallback for legacy installs
+scholarly                # Google Scholar (note: gets CAPTCHA-blocked in prod)
 
-#Closed source crawling
-praw
+# ── Semantic Scholar (no extra package — uses requests) ───────────────────
+# No install needed — direct REST API calls via requests
+
+# ── Closed source crawling ────────────────────────────────────────────────
+praw                     # Reddit API wrapper
+
+# ── Optional: .env file loading ──────────────────────────────────────────
+python-dotenv            # load API keys from .env file
+
+# ── API credentials needed (set as env vars or in .env) ──────────────────
+# HACKERONE_USERNAME         HackerOne account username
+# HACKERONE_API_TOKEN        https://hackerone.com/settings/api_token/edit
+# MSRC_API_KEY               https://portal.msrc.microsoft.com/
+# REDDIT_CLIENT_ID           https://www.reddit.com/prefs/apps
+# REDDIT_CLIENT_SECRET       https://www.reddit.com/prefs/apps
+# GITHUB_TOKEN               https://github.com/settings/tokens (raises rate limit 60→5000/hr)
+# IEEE_API_KEY               https://developer.ieee.org/ (free)
+# VULNERS_API_KEY            https://vulners.com/userinfo (free)
+# SEMANTIC_SCHOLAR_API_KEY   https://www.semanticscholar.org/product/api (optional, raises limits)

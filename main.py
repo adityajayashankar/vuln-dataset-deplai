@@ -3,9 +3,12 @@ main.py
 -------
 Entry point for the vulnerability analysis agent.
 Run: python main.py
+
+FIX: Corrected import — file is agents.py not agent.py
 """
 
-from pipeline.agent import run_agent
+from pipeline.agents import run_agent   # ← was: pipeline.agent (wrong filename)
+
 
 def main():
     print("=" * 60)
@@ -32,6 +35,7 @@ def main():
         print("=" * 60)
         print(result)
         print("=" * 60 + "\n")
+
 
 if __name__ == "__main__":
     main()

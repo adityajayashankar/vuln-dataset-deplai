@@ -1,19 +1,12 @@
 """
-crawl_blogs.py  (EXPANDED)
+crawl_blogs.py  (FIXED)
 --------------------------
 Crawls security research blogs and write-ups for real attack context.
 Uses Crawl4AI — auto-converts HTML → clean Markdown.
 
-EXPANSION vs previous version:
-  - 7 URLs → 80+ URLs across 8 source categories
-  - Added: Project Zero, Rapid7, Snyk, PortSwigger Research,
-           VulhubFull (all major CVEs), NVD References (per-CVE),
-           CISA Alerts, HackTricks, PayloadsAllTheThings
-  - Added: crawl_nvd_references() — fetches reference URLs from
-           raw_nvd.json entries, giving per-CVE write-ups automatically
-  - Added: discover_vulhub_readmes() — discovers ALL Vulhub CVE READMEs
-           dynamically from GitHub Tree API (no hardcoding needed)
-  - Added: rate limiting, retry logic, content quality filter
+FIXES in this version:
+  1. Incremental saving: Writes to raw_blogs.json immediately after every successful crawl.
+  2. Safe CVSS parsing: Prevents ValueError crashes on "N/A" NVD scores.
 """
 
 import asyncio
@@ -170,9 +163,16 @@ def harvest_nvd_reference_urls(
     with open(p, encoding="utf-8") as f:
         records = json.load(f)
 
+    # Safe float parsing to prevent ValueError crashes
+    def get_cvss(r):
+        try:
+            return float(r.get("cvss_score") or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
     prioritised = sorted(
         [r for r in records if r.get("cvss_score")],
-        key=lambda r: float(r.get("cvss_score") or 0),
+        key=get_cvss,
         reverse=True,
     )[:500]
 
@@ -213,7 +213,7 @@ def classify_blog_record(url: str, markdown: str) -> dict:
     return {"url": url, "source_type": source_type, "cves_mentioned": cves, "content": markdown[:8000]}
 
 
-async def crawl_all(urls: list[str], delay: float = 1.2) -> list[dict]:
+async def crawl_all(urls: list[str], out_file: str, delay: float = 1.2) -> list[dict]:
     results, failed, filtered = [], 0, 0
     async with AsyncWebCrawler(verbose=False) as crawler:
         for i, url in enumerate(urls):
@@ -225,6 +225,10 @@ async def crawl_all(urls: list[str], delay: float = 1.2) -> list[dict]:
                         results.append(record)
                         cve_tag = f" [{','.join(record['cves_mentioned'][:2])}]" if record["cves_mentioned"] else ""
                         print(f"  ✅ [{i+1}/{len(urls)}] {url[:70]}{cve_tag}")
+                        
+                        # FIX: Save incrementally. If the script gets interrupted, your data is safe.
+                        with open(out_file, "w", encoding="utf-8") as f:
+                            json.dump(results, f, indent=2, ensure_ascii=False)
                     else:
                         filtered += 1
                 else:
@@ -247,6 +251,9 @@ def run(
     max_nvd_refs: int = 100,
     crawl_delay: float = 1.2,
 ):
+    # Ensure the data directory exists
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    
     all_urls = list(TARGET_URLS)
 
     if discover_vulhub:
@@ -264,12 +271,10 @@ def run(
         print(f"  +{len(new)} NVD reference URLs")
 
     all_urls = list(dict.fromkeys(all_urls))
-    print(f"\nCrawling {len(all_urls)} security sources (was 7)...")
+    print(f"\nCrawling {len(all_urls)} security sources...")
 
-    data = asyncio.run(crawl_all(all_urls, delay=crawl_delay))
-
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # Passed 'out' directly into the crawler so it can save incrementally
+    data = asyncio.run(crawl_all(all_urls, out_file=out, delay=crawl_delay))
 
     cve_tagged = sum(1 for d in data if d.get("cves_mentioned"))
     source_counts: dict = {}
@@ -277,7 +282,7 @@ def run(
         st = d.get("source_type", "unknown")
         source_counts[st] = source_counts.get(st, 0) + 1
 
-    print(f"\n✅ Saved {len(data)} pages → {out}")
+    print(f"\n✅ Finished crawling. Data is stored in → {out}")
     print(f"   With CVE mentions: {cve_tagged}")
     print("\n   By source type:")
     for src, cnt in sorted(source_counts.items(), key=lambda x: -x[1]):

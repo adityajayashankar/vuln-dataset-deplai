@@ -25,6 +25,7 @@ FIXES in this version:
        to_owasp_cooccurrence_pairs()     — OWASP-grounded, fires for ALL records
        to_cwe_family_pairs()             — CWE cluster pairs, ~30% of records
        to_kev_correlation_pairs()        — KEV campaign co-exploitation pairs
+       to_blog_cooccurrence_pairs()      — Blog-sourced CVE pairs, chains & campaigns
        to_correlation_training_pairs()   — EXPANDED: 5 templates (was 3)
 
 DATA SOURCES:
@@ -312,14 +313,51 @@ def build_github_lookup(github_path: str) -> dict:
 
 
 def build_blog_lookup(blog_path: str) -> dict:
+    """Build blog lookup keyed by CVE. Each value is a dict with:
+      - text: concatenated blog content for this CVE
+      - cve_pairs: all co-occurrence pairs involving this CVE
+      - exploit_chains: all chain signals involving this CVE
+      - campaign_signals: campaign sentences mentioning this CVE
+      - cwes: CWEs found alongside this CVE
+      - products: affected products found alongside this CVE
+    """
     raw    = load_json(blog_path)
     lookup: dict = {}
     for item in raw:
         content = item.get("content", "")[:3000]
         source  = f"Source: {item.get('url', 'Unknown Blog')}\n\n{content}"
+        url     = item.get("url", "")
+        pairs   = item.get("cve_pairs", [])
+        chains  = item.get("exploit_chains", [])
+        camps   = item.get("campaign_signals", [])
+        cwes    = item.get("cwes_mentioned", [])
+        prods   = item.get("affected_products", [])
+
         for cve in item.get("cves_mentioned", []):
             cve = cve.upper()
-            lookup[cve] = lookup.get(cve, "") + ("\n\n---\n\n" if cve in lookup else "") + source
+            if cve not in lookup:
+                lookup[cve] = {
+                    "text": source,
+                    "cve_pairs": [],
+                    "exploit_chains": [],
+                    "campaign_signals": [],
+                    "cwes": [],
+                    "products": [],
+                    "urls": [],
+                }
+            else:
+                lookup[cve]["text"] += "\n\n---\n\n" + source
+            # Accumulate pairs/chains that involve this CVE
+            for p in pairs:
+                if cve in (p.get("cve_a","").upper(), p.get("cve_b","").upper()):
+                    lookup[cve]["cve_pairs"].append(p)
+            for c in chains:
+                if cve in (c.get("cve_a","").upper(), c.get("cve_b","").upper()):
+                    lookup[cve]["exploit_chains"].append(c)
+            lookup[cve]["campaign_signals"].extend(camps)
+            lookup[cve]["cwes"].extend(cwes)
+            lookup[cve]["products"].extend(prods)
+            lookup[cve]["urls"].append(url)
     return lookup
 
 
@@ -412,14 +450,49 @@ def build_vendor_lookup(vendor_path: str) -> dict:
 
 
 def load_cooccurrence_pairs(cooccur_path: str) -> list:
+    """Load co-occurrence pairs and convert to training format.
+    raw_cooccurrence.json has key 'cooccurrence_pairs' (not 'training_pairs').
+    Each entry has: cve_a, cve_b, source, confidence, reason, profile."""
     p = Path(cooccur_path)
     if not p.exists():
         return []
     try:
         data  = json.loads(p.read_text(encoding="utf-8"))
-        pairs = data.get("training_pairs", [])
-        print(f"  Co-occurrence pairs (from file):  {len(pairs)}")
-        return pairs
+        # Try both key names for compatibility
+        raw_pairs = data.get("cooccurrence_pairs", data.get("training_pairs", []))
+        training = []
+        for pair in raw_pairs:
+            # If it already has instruction/output keys, pass through
+            if "instruction" in pair and "output" in pair:
+                training.append(pair)
+                continue
+            # Convert raw co-occurrence pair to training format
+            cve_a  = pair.get("cve_a", "")
+            cve_b  = pair.get("cve_b", "")
+            source = pair.get("source", "cooccurrence")
+            conf   = pair.get("confidence", 0.5)
+            reason = pair.get("reason", f"{cve_a} and {cve_b} co-occur")
+            profile = pair.get("profile", "")
+
+            instruction = (
+                f"What vulnerabilities co-occur with {cve_a}? "
+                f"Explain the relationship and why they appear together."
+            )
+            output = (
+                f"{cve_a} co-occurs with {cve_b} (confidence: {conf:.0%}). "
+                f"Source: {source}. {reason}"
+            )
+            if profile:
+                output += f" Stack profile: {profile}."
+
+            training.append({
+                "instruction": instruction,
+                "output":      output,
+                "layer":       "vulnerability_correlation",
+                "cve_id":      cve_a,
+            })
+        print(f"  Co-occurrence pairs (from file):  {len(training)}")
+        return training
     except Exception as e:
         print(f"  ⚠️  Co-occurrence pairs load failed: {e}")
         return []
@@ -537,8 +610,10 @@ def build_record(
         exploit_ctx_parts.append(f"Research:\n{papers_map[cve_id][:1000]}")
     if closed_map.get(cve_id):
         exploit_ctx_parts.append(f"Intelligence:\n{closed_map[cve_id][:1000]}")
-    if blog_map.get(cve_id):
-        exploit_ctx_parts.append(f"Blog:\n{blog_map[cve_id][:500]}")
+    blog_entry = blog_map.get(cve_id, {})
+    if blog_entry:
+        blog_text = blog_entry["text"] if isinstance(blog_entry, dict) else str(blog_entry)
+        exploit_ctx_parts.append(f"Blog:\n{blog_text[:500]}")
     if exploits:
         exploit_ctx_parts.append(
             f"Exploit-DB: {exploit_count} exploit(s) — {', '.join(exploit_titles)}"
@@ -554,7 +629,7 @@ def build_record(
     sources = ["NVD"]
     if epss_score:              sources.append("EPSS")
     if gh_advisory:             sources.append("GitHub Advisories")
-    if blog_map.get(cve_id):    sources.append("Security Blogs")
+    if blog_map.get(cve_id):       sources.append("Security Blogs")
     if papers_map.get(cve_id):  sources.append("Research Papers")
     if closed_map.get(cve_id):  sources.append("Closed Sources")
     if kev_entry:               sources.append("CISA KEV")
@@ -1076,6 +1151,118 @@ def to_kev_correlation_pairs(record: dict) -> list:
     return pairs
 
 
+def to_blog_cooccurrence_pairs(record: dict, blog_map: dict) -> list:
+    """
+    Generate co-occurrence training pairs from blog-sourced signals.
+    Uses cve_pairs, exploit_chains, and campaign_signals extracted
+    by crawl_blogs.py from real security blog pages.
+
+    This is the key connector: raw_blogs.json has 5,700+ CVE pairs and
+    2,900+ exploit chains. Without this function, all that signal was lost.
+    """
+    cve_id = record.get("cve_id", "")
+    desc   = record.get("description", "")[:200]
+    pairs  = []
+
+    blog_entry = blog_map.get(cve_id)
+    if not blog_entry or not isinstance(blog_entry, dict):
+        return pairs
+
+    # ── Blog CVE co-occurrence pairs ─────────────────────────────────────
+    blog_pairs = blog_entry.get("cve_pairs", [])
+    if blog_pairs:
+        # Deduplicate and take top pairs
+        seen_co = set()
+        unique_co_cves = []
+        for bp in blog_pairs:
+            other = bp.get("cve_b", "") if bp.get("cve_a", "").upper() == cve_id else bp.get("cve_a", "")
+            other = other.upper()
+            if other and other != cve_id and other not in seen_co:
+                seen_co.add(other)
+                unique_co_cves.append((other, bp.get("signal", "co_page")))
+
+        if unique_co_cves:
+            co_lines = "\n".join(
+                f"  - {cve} (signal: {sig})"
+                for cve, sig in unique_co_cves[:8]
+            )
+            pairs.append({
+                "instruction": (
+                    f"What CVEs co-occur with {cve_id} based on security blog analysis?"
+                ),
+                "input": desc,
+                "output": (
+                    f"Security blog analysis reveals {cve_id} co-occurs with "
+                    f"{len(unique_co_cves)} other CVEs on the same pages:\n\n"
+                    f"{co_lines}\n\n"
+                    f"Co-occurrence on the same page indicates these vulnerabilities "
+                    f"affect related products, are exploited in the same campaigns, "
+                    f"or form parts of the same attack chain. Source: crawled security blogs."
+                ),
+                "layer": "vulnerability_correlation",
+                "cve_id": cve_id,
+            })
+
+    # ── Blog exploit chain signals ───────────────────────────────────────
+    blog_chains = blog_entry.get("exploit_chains", [])
+    if blog_chains:
+        seen_chain = set()
+        unique_chains = []
+        for ch in blog_chains:
+            other = ch.get("cve_b", "") if ch.get("cve_a", "").upper() == cve_id else ch.get("cve_a", "")
+            other = other.upper()
+            sig   = ch.get("signal", "")
+            ctx   = ch.get("context", "")[:150]
+            if other and other != cve_id and other not in seen_chain:
+                seen_chain.add(other)
+                unique_chains.append((other, sig, ctx))
+
+        if unique_chains:
+            chain_lines = "\n".join(
+                f"  - {cve} ({sig}): {ctx}"
+                for cve, sig, ctx in unique_chains[:6]
+            )
+            pairs.append({
+                "instruction": (
+                    f"Is {cve_id} part of any known exploit chains? "
+                    f"What CVEs are chained with it?"
+                ),
+                "input": desc,
+                "output": (
+                    f"Yes. Security research identifies {cve_id} in exploit chains "
+                    f"with {len(unique_chains)} other CVEs:\n\n"
+                    f"{chain_lines}\n\n"
+                    f"These chaning relationships mean an attacker exploiting {cve_id} "
+                    f"likely pivots to these related CVEs for privilege escalation, "
+                    f"lateral movement, or deeper system compromise."
+                ),
+                "layer": "vulnerability_correlation",
+                "cve_id": cve_id,
+            })
+
+    # ── Blog campaign signals ────────────────────────────────────────────
+    blog_campaigns = blog_entry.get("campaign_signals", [])
+    if blog_campaigns:
+        camp_text = " | ".join(blog_campaigns[:3])
+        pairs.append({
+            "instruction": (
+                f"Has {cve_id} been used in any real-world attack campaigns?"
+            ),
+            "input": desc,
+            "output": (
+                f"Security blog intelligence indicates {cve_id} has been observed "
+                f"in active campaigns:\n\n"
+                f"Evidence: {camp_text}\n\n"
+                f"Campaign-associated CVEs warrant immediate patching priority "
+                f"as they indicate active adversary tooling targeting this weakness."
+            ),
+            "layer": "vulnerability_correlation",
+            "cve_id": cve_id,
+        })
+
+    return pairs
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  TRAINING PAIR QUALITY FILTERS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1135,19 +1322,35 @@ def dedup_training_pairs(pairs: list) -> list:
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _safe_write_jsonl(records: list, out_path: str):
+    """Write JSONL atomically: write to .tmp then rename."""
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    Path(tmp).replace(out_path)
+
+
 def run():
+    # Resolve all paths relative to this script's directory so the output
+    # lands in the right place regardless of the working directory.
+    script_dir = Path(__file__).resolve().parent
+
+    def _p(rel: str) -> str:
+        return str((script_dir / rel).resolve())
+
     print("Loading raw data sources...")
 
-    nvd_records   = load_json("data/raw_nvd.json")
-    epss_map      = build_epss_lookup("data/raw_epss.json")
-    github_map    = build_github_lookup("data/raw_github.json")
-    blog_map      = build_blog_lookup("data/raw_blogs.json")
-    papers_map    = build_papers_lookup("data/raw_papers.json")
-    closed_map    = build_closed_sources_lookup("data/raw_closed.json")
-    kev_map       = build_kev_lookup("data/raw_cisa_kev.json")
-    exploitdb_map = build_exploitdb_lookup("data/raw_exploitdb.json")
-    corr_lookup   = build_correlations_lookup("data/raw_correlations.json")
-    vendor_lookup = build_vendor_lookup("data/raw_vendor_advisories.json")
+    nvd_records   = load_json(_p("raw_nvd.json"))
+    epss_map      = build_epss_lookup(_p("raw_epss.json"))
+    github_map    = build_github_lookup(_p("raw_github.json"))
+    blog_map      = build_blog_lookup(_p("raw_blogs.json"))
+    papers_map    = build_papers_lookup(_p("raw_papers.json"))
+    closed_map    = build_closed_sources_lookup(_p("raw_closed.json"))
+    kev_map       = build_kev_lookup(_p("raw_cisa_kev.json"))
+    exploitdb_map = build_exploitdb_lookup(_p("raw_exploitdb.json"))
+    corr_lookup   = build_correlations_lookup(_p("raw_correlations.json"))
+    vendor_lookup = build_vendor_lookup(_p("raw_vendor_advisories.json"))
 
     print(f"  NVD records:           {len(nvd_records)}")
     print(f"  EPSS entries:          {len(epss_map)}")
@@ -1189,6 +1392,7 @@ def run():
         training_pairs.extend(to_owasp_cooccurrence_pairs(record))    # fires for ALL records
         training_pairs.extend(to_cwe_family_pairs(record))            # fires for ~30% of records
         training_pairs.extend(to_kev_correlation_pairs(record))       # fires for KEV records only
+        training_pairs.extend(to_blog_cooccurrence_pairs(record, blog_map))  # blog CVE pairs & chains
 
     # ── Pass 2: CISA KEV entries not in NVD batch ──────────────────────────
     kev_only_count = 0
@@ -1227,12 +1431,13 @@ def run():
         training_pairs.extend(to_owasp_cooccurrence_pairs(record))
         training_pairs.extend(to_cwe_family_pairs(record))
         training_pairs.extend(to_kev_correlation_pairs(record))
+        training_pairs.extend(to_blog_cooccurrence_pairs(record, blog_map))  # blog CVE pairs & chains
         kev_only_count += 1
 
     print(f"  KEV-only records added (not in NVD batch): {kev_only_count}")
 
     # ── Pass 3: GHSA-only GitHub advisories (no CVE ID) ────────────────────
-    raw_github      = load_json("data/raw_github.json")
+    raw_github      = load_json(_p("raw_github.json"))
     ghsa_only_count = 0
 
     for adv in raw_github:
@@ -1274,13 +1479,14 @@ def run():
         training_pairs.extend(to_correlation_training_pairs(record))
         training_pairs.extend(to_owasp_cooccurrence_pairs(record))
         training_pairs.extend(to_cwe_family_pairs(record))
+        training_pairs.extend(to_blog_cooccurrence_pairs(record, blog_map))  # blog CVE pairs & chains
         kev_only_count += 1  # reuse counter for simplicity
         ghsa_only_count += 1
 
     print(f"  GHSA-only records added (no CVE ID):       {ghsa_only_count}")
 
     # ── Load co-occurrence pairs from file (build_cooccurrence.py output) ──
-    cooccurrence_pairs = load_cooccurrence_pairs("data/raw_cooccurrence.json")
+    cooccurrence_pairs = load_cooccurrence_pairs(_p("raw_cooccurrence.json"))
     training_pairs.extend(cooccurrence_pairs)
 
     # ── Quality filter + dedup ──────────────────────────────────────────────
@@ -1290,13 +1496,11 @@ def run():
     print(f"Final training pairs after filtering: {len(training_pairs)}")
 
     # ── Save outputs ────────────────────────────────────────────────────────
-    with open("data/vuln_dataset.jsonl", "w", encoding="utf-8") as f:
-        for r in full_records:
-            f.write(json.dumps(r) + "\n")
+    dataset_path = _p("vuln_dataset.jsonl")
+    pairs_path   = _p("training_pairs.jsonl")
 
-    with open("data/training_pairs.jsonl", "w", encoding="utf-8") as f:
-        for p in training_pairs:
-            f.write(json.dumps(p) + "\n")
+    _safe_write_jsonl(full_records, dataset_path)
+    _safe_write_jsonl(training_pairs, pairs_path)
 
     # ── Stats ───────────────────────────────────────────────────────────────
     layer_counts: dict = {}
@@ -1320,8 +1524,8 @@ def run():
     vendor_recs    = sum(1 for r in full_records if "Vendor Advisory Context" in r.get("real_world_exploit", ""))
     blog_recs      = sum(1 for r in full_records if "Security Blogs" in r.get("source", ""))
 
-    print(f"\n✅ Full schema records:  {len(full_records)} → data/vuln_dataset.jsonl")
-    print(f"✅ Training pairs total: {len(training_pairs)} → data/training_pairs.jsonl")
+    print(f"\n✅ Full schema records:  {len(full_records)} → {dataset_path}")
+    print(f"✅ Training pairs total: {len(training_pairs)} → {pairs_path}")
 
     print("\nTraining pairs per layer:")
     for layer, count in sorted(layer_counts.items(), key=lambda x: -x[1]):

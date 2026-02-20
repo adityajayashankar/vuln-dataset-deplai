@@ -206,8 +206,10 @@ def run(total: int = 10_000, batch: int = 2_000, out: str = "data/raw_nvd.json")
     out_path = Path(out)
 
     # ── Cache check ────────────────────────────────────────────────────────
-    if not is_stale(out_path, max_age_hours=NVD_CACHE_MAX_AGE_HOURS):
-        existing_count = nvd_record_count(out_path)
+    existing_count = nvd_record_count(out_path)
+    need_more = (total > existing_count * 1.1)  # user wants significantly more
+
+    if not need_more and not is_stale(out_path, max_age_hours=NVD_CACHE_MAX_AGE_HOURS):
         print(f"  ✅ NVD cache is fresh (< {NVD_CACHE_MAX_AGE_HOURS}h old) — "
               f"skipping fetch ({existing_count:,} records on disk)")
         return
@@ -216,7 +218,10 @@ def run(total: int = 10_000, batch: int = 2_000, out: str = "data/raw_nvd.json")
     existing_count = len(existing)
 
     # ── Incremental or full fetch ──────────────────────────────────────────
-    if existing_count > 0:
+    # If user requested MORE records than we have cached → full fetch
+    need_full_fetch = need_more
+
+    if existing_count > 0 and not need_full_fetch:
         start_date = nvd_start_date(out_path, lookback_days=7)
         if start_date:
             print(f"  Incremental NVD fetch — {existing_count:,} records already cached")
@@ -229,7 +234,10 @@ def run(total: int = 10_000, batch: int = 2_000, out: str = "data/raw_nvd.json")
             print(f"  Could not determine start date — doing full fetch")
             new_records = fetch_nvd_range(max_results=total, batch_size=batch)
     else:
-        print(f"  No existing cache — doing full fetch ({total:,} records)")
+        if need_full_fetch and existing_count > 0:
+            print(f"  Scaling up: {existing_count:,} cached but {total:,} requested — full fetch")
+        else:
+            print(f"  No existing cache — doing full fetch ({total:,} records)")
         new_records = fetch_nvd_range(max_results=total, batch_size=batch)
 
     # ── Merge and save ─────────────────────────────────────────────────────

@@ -1,0 +1,119 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sources.yaml  —  Fully agentic configuration
+#
+# NO hardcoded topics or websites. The LLM drives all discovery.
+# Config only sets limits, credentials, and quality filters.
+# ─────────────────────────────────────────────────────────────────────────────
+
+settings:
+  # ── Crawl settings ─────────────────────────────────────────────────────
+  concurrent_tasks: 15           # crawl4ai parallel workers
+  max_content_chars: 10000
+  min_content_chars: 50          # low — CVE pages can be short but still valid
+  max_total_urls: 600            # cap on Round 1 URLs
+  output_file: data/raw_blogs.json
+
+  # ── Agentic pipeline settings ──────────────────────────────────────────
+  n_search_queries: 25           # Phase 1: LLM generates this many queries
+  max_results_per_query: 10      # Phase 2: Tavily results per query
+  max_harvested_urls: 100        # Phase 5b: links extracted from crawled pages
+  n_round2_queries: 10           # Phase 6: LLM gap analysis follow-up queries
+  max_round2_urls: 150           # Phase 7: cap on Round 2 discovery
+
+  # ── Tavily — search API built for AI agents ────────────────────────────
+  # Key: https://app.tavily.com  (free: 1000 searches/month)
+  tavily_api_key_env: TAVILY_API_KEY
+
+  # ── OpenRouter — LLM for query generation + gap analysis ───────────────
+  # Key: https://openrouter.ai/keys  (free models available, no monthly cap)
+  openrouter_api_key_env: OPENROUTER_API_KEY
+  # Free models (pick one):
+  #   google/gemma-3n-e2b-it:free       ← current
+  #   google/gemma-3-27b-it:free
+  #   meta-llama/llama-3.3-70b-instruct:free
+  #   deepseek/deepseek-r1:free
+  #   mistralai/mistral-7b-instruct:free
+  llm_model: google/gemma-3n-e2b-it:free
+
+# ── Quality filter — ANY match keeps the page ────────────────────────────────
+quality_keywords:
+  - cve
+  - vulnerability
+  - exploit
+  - payload
+  - injection
+  - overflow
+  - rce
+  - xss
+  - sqli
+  - ssrf
+  - bypass
+  - poc
+  - deserialization
+  - privilege escalation
+  - remote code execution
+  - authentication bypass
+  - exploit chain
+  - campaign
+  - threat actor
+  - cwe
+
+# ── Structured signals to extract from every page ────────────────────────────
+# These feed directly into build_correlations.py + build_cooccurrence.py
+extraction_targets:
+  cve_pattern: 'CVE-\d{4}-\d+'
+  cwe_pattern: 'CWE-\d+'
+  cvss_pattern: 'CVSS[v23\s:]+[\d.]+'
+  owasp_pattern: 'A\d{2}:202[1-9]'
+  exploit_chain_phrases:
+    - "chained with"
+    - "combined with"
+    - "exploit chain"
+    - "followed by"
+    - "leveraged alongside"
+    - "initial access"
+    - "privilege escalation"
+    - "lateral movement"
+  campaign_phrases:
+    - "ransomware campaign"
+    - "threat actor"
+    - "APT"
+    - "nation-state"
+    - "attributed to"
+    - "exploited in the wild"
+    - "actively exploited"
+
+# ── Always-on dynamic sources (no LLM, pure API) ────────────────────────────
+dynamic:
+  vulhub:
+    enabled: true
+    max_readmes: 600             # scrape ALL Vulhub CVE READMEs — each is a co-occurrence signal
+    api_url: "https://api.github.com/repos/vulhub/vulhub/git/trees/master?recursive=1"
+    raw_base: "https://raw.githubusercontent.com/vulhub/vulhub/master/"
+
+  nvd_references:
+    enabled: true
+    max_urls: 300
+    nvd_data_path: data/raw_nvd.json
+    top_cvss_count: 1000         # pull from top 1000 high-CVSS records
+    allowed_domains:
+      - "blog."
+      - "research."
+      - "portswigger"
+      - "rapid7"
+      - "qualys"
+      - "tenable"
+      - "snyk"
+      - "github.com/"
+      - "exploit-db"
+      - "packetstorm"
+      - "security.googleblog"
+      - "googleprojectzero"
+      - "cisa.gov"
+      - "msrc.microsoft.com"
+      - "securitylab.github"
+
+# ── No hardcoded topics — the LLM decides what to search for ─────────────────
+# Phase 1: LLM generates n_search_queries queries covering vuln correlations,
+#           exploit chains, APT campaigns, CWE families, product clusters, etc.
+# Phase 6: LLM reviews Round 1 gaps and generates n_round2_queries follow-ups.
